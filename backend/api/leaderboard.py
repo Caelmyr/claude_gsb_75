@@ -26,7 +26,9 @@ def leaderboard(contest_id):
     if not contest.get("visble", True) and not as_admin:
         return err("竞赛不存在", 404)
     data = get_leaderboard(contest, as_admin=as_admin)
-    data["rows"] = sorted(data.get("rows", []), key=lambda r: r.get("penalty", 0))
+    # 榜单已在 ranking 模块按模式排好序（ACM：解题数/罚时；IOI：折算后总分），
+    # 这里仅按 rank 兜底稳定排序，避免覆盖 IOI 的总分名次
+    data["rows"] = sorted(data.get("rows", []), key=lambda r: r.get("rank", 0))
     data["contest_status"] = contest_status(contest)
     data["frozen_now"] = frozen_now(contest)
     data["freeze_time"] = contest.get("freeze_time")

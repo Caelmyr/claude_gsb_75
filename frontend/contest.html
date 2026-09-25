@@ -84,9 +84,23 @@
       let c = null;
       if (id) c = await OJ.api("/contests/" + id);
       const pids = new Set((c && c.problems || []).map(p => p.problem_id));
-      const problemChecks = problemsCache.map(p =>
-        `<label style="font-weight:400"><input type="checkbox" value="${OJ.esc(p.id)}" ${pids.has(p.id) ? "checked" : ""}> ${OJ.esc(p.id)} · ${OJ.esc(p.title)}</label>`
-      ).join("");
+      const existPoints = {};
+      (c && c.problems || []).forEach(p => { existPoints[p.problem_id] = p.points; });
+      const problemChecks = problemsCache.map(p => {
+        const pts = Object.prototype.hasOwnProperty.call(existPoints, p.id)
+          ? existPoints[p.id] : (p.points != null ? p.points : 100);
+        return `
+        <div class="flex-between gap-8" style="padding:4px 0">
+          <label style="font-weight:400;flex:1;min-width:0">
+            <input type="checkbox" class="prob-check" value="${OJ.esc(p.id)}" ${pids.has(p.id) ? "checked" : ""}>
+            ${OJ.esc(p.id)} · ${OJ.esc(p.title)}
+          </label>
+          <span class="muted" style="font-size:12px">分值
+            <input type="number" class="prob-points" min="0" max="100000" step="1" value="${OJ.esc(pts)}"
+                   data-pid="${OJ.esc(p.id)}" style="width:80px">
+          </span>
+        </div>`;
+      }).join("");
       const body = `
         <div class="form-group"><label>竞赛标题</label><input id="f_title" value="${OJ.esc(c ? c.title : "")}"></div>
         <div class="form-group"><label>描述</label><textarea id="f_desc" rows="2">${OJ.esc(c ? c.description : "")}</textarea></div>
@@ -103,13 +117,32 @@
             <label style="font-weight:400"><input type="checkbox" id="f_freeze_en" ${c && c.freeze_enabled ? "checked" : ""}> 启用封榜</label>
             <label style="font-weight:400;margin-left:12px"><input type="checkbox" id="f_visible" ${!c || c.visible ? "checked" : ""}> 公开可见</label></div>
         </div>
-        <div class="form-group"><label>竞赛题目</label>
-          <div class="card" style="max-height:200px;overflow:auto;background:var(--surface-2)">${problemChecks || '<span class="muted">暂无题目</span>'}</div>
+        <div class="form-group"><label>竞赛题目与分值<small class="muted" style="margin-left:8px">IOI 模式下按每题实际得分比例 × 该题分值汇总；ACM 模式按解题数排名，分值不影响排名</small></label>
+          <div class="card" style="max-height:260px;overflow:auto;background:var(--surface-2)">${problemChecks || '<span class="muted">暂无题目</span>'}</div>
+          <div class="muted mt-8" style="font-size:12px">题目分值合计：<b id="ptsTotal">0</b> 分</div>
         </div>`;
       const mask = OJ.openModal(id ? "编辑竞赛" : "新建竞赛", body);
       mask.querySelector(".modal-actions").innerHTML = `
         <button class="btn btn-outline" onclick="this.closest('.modal-mask').remove()">取消</button>
         <button class="btn btn-primary" onclick="save('${id || ""}')">保存</button>`;
+      updatePtsTotal();
+      mask.querySelectorAll(".prob-check").forEach(el =>
+        el.addEventListener("change", updatePtsTotal));
+      mask.querySelectorAll(".prob-points").forEach(el =>
+        el.addEventListener("input", updatePtsTotal));
+    }
+
+    function updatePtsTotal() {
+      const box = document.getElementById("ptsTotal");
+      if (!box) return;
+      let total = 0;
+      document.querySelectorAll(".prob-check").forEach(cb => {
+        if (!cb.checked) return;
+        const inp = document.querySelector(`.prob-points[data-pid="${CSS.escape(cb.value)}"]`);
+        const v = inp ? parseInt(inp.value, 10) : 100;
+        if (!isNaN(v) && v >= 0) total += v;
+      });
+      box.textContent = total;
     }
 
     async function loadProblems() {
@@ -118,9 +151,22 @@
     }
 
     async function save(id) {
-      const problems = [...document.querySelectorAll('.modal input[type="checkbox"][value]')]
-        .filter(x => x.value && !["f_freeze_en","f_visible"].includes(x.id) && x.checked)
-        .map((x, i) => ({ problem_id: x.value, points: 100, order: i + 1 }));
+      const problems = [];
+      for (const cb of document.querySelectorAll(".prob-check")) {
+        if (!cb.checked) continue;
+        const inp = document.querySelector(`.prob-points[data-pid="${CSS.escape(cb.value)}"]`);
+        const raw = inp ? String(inp.value).trim() : "100";
+        if (raw === "" || isNaN(parseInt(raw, 10))) {
+          OJ.toast(`题目 ${cb.value} 的分值无效`, "error");
+          return;
+        }
+        const pts = parseInt(raw, 10);
+        if (pts < 0 || pts > 100000) {
+          OJ.toast(`题目 ${cb.value} 的分值需在 0~100000 之间`, "error");
+          return;
+        }
+        problems.push({ problem_id: cb.value, points: pts, order: problems.length + 1 });
+      }
       const body = {
         title: document.getElementById("f_title").value.trim(),
         description: document.getElementById("f_desc").value.trim(),

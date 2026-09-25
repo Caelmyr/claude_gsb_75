@@ -67,27 +67,82 @@ def empty_user_record(contest_id, user_id, username, nickname):
     }
 
 
-def _summarize(record, mode, penalty_seconds):
+def contest_problem_points(contest):
+    """返回 {problem_id: 该题在竞赛中的分值}。未配置分值时按 100 兜底。"""
+    out = {}
+    for p in contest.get("problems", []) or []:
+        pid = p.get("problem_id")
+        if pid is None:
+            continue
+        try:
+            out[pid] = max(0, int(p.get("points", 100)))
+        except (ValueError, TypeError):
+            out[pid] = 100
+    return out
+
+
+def _weighted_score(raw, full, points):
+    """按「实际得分 / 题目满分 * 竞赛分值」折算该题在竞赛中的得分。
+
+    raw/full 是评测得到的实际分与题目原始满分（题目自身的分值体系，默认 100），
+    points 是该题在本竞赛中被管理员单独指定的分值。
+    历史分片缺少 full 信息时按 100 兜底；满分缺失时直接使用原始分。
+    """
+    try:
+        raw = float(raw or 0)
+        full = float(full or 0)
+        points = float(points or 0)
+    except (ValueError, TypeError):
+        return 0
+    if full <= 0:
+        full = 100.0
+    if raw < 0:
+        raw = 0.0
+    if raw > full:
+        raw = full
+    return round(raw / full * points, 2)
+
+
+def _summarize(record, contest, mode, penalty_seconds):
     """由用户成绩分片计算榜单摘要行。"""
     solved = 0
     score = 0
     penalty = 0
     total_time_ms = 0
-    for p in record.get("problems", {}).values():
+    problem_points = contest_problem_points(contest)
+    problems = {}
+    for pid, p in record.get("problems", {}).items():
+        # 题目被移出竞赛后，历史成绩不再计入总分（竞赛未配题时兜底全部保留）
+        if problem_points and pid not in problem_points:
+            continue
+        entry = dict(p)
         if p.get("solved"):
             solved += 1
-        score += p.get("score", 0)
         penalty += p.get("penalty", 0)
         total_time_ms += p.get("time_ms", 0)
+        if mode == "ioi":
+            # IOI：保留原始得分，榜单得分按竞赛分值折算
+            raw = p.get("raw_score", p.get("score", 0))
+            full = p.get("full_score", 100)
+            weighted = _weighted_score(raw, full, problem_points.get(pid, 100))
+            entry["raw_score"] = raw
+            entry["full_score"] = full or 100
+            entry["score"] = weighted
+            score += weighted
+        else:
+            # ACM：每解出一题计 1，不与竞赛分值挂钩
+            entry["score"] = p.get("score", 0)
+            score += entry["score"]
+        problems[pid] = entry
     return {
         "user_id": record["user_id"],
         "username": record.get("username", ""),
         "nickname": record.get("nickname", record.get("username", "")),
         "solved": solved,
-        "score": score,
+        "score": round(score, 2),
         "penalty": penalty,
         "total_time_ms": total_time_ms,
-        "problems": record.get("problems", {}),
+        "problems": problems,
     }
 
 
@@ -99,8 +154,14 @@ def _sort_key(row, mode):
     return (-row["score"], row["total_time_ms"], row["user_id"])
 
 
-def _rebuild_ranking(contest_id, mode, penalty_seconds):
-    """重建聚合榜单（扫描该竞赛全部分片并排序）。"""
+def _rebuild_ranking(contest):
+    """重建聚合榜单（扫描该竞赛全部分片并按当前模式/分值重新折算排序）。
+
+    竞赛题目分值调整后调用本函数即可让榜单总分按新分值重算。
+    """
+    contest_id = contest["id"]
+    mode = contest.get("mode", "acm")
+    penalty_seconds = int(config.DEFAULT_SETTINGS["ranking"]["penalty_seconds"])
     d = _score_dir(contest_id)
     rows = []
     for name in list_files(d):
@@ -108,7 +169,7 @@ def _rebuild_ranking(contest_id, mode, penalty_seconds):
             continue
         rec = read_json(os.path.join(d, name + ".json"))
         if rec:
-            rows.append(_summarize(rec, mode, penalty_seconds))
+            rows.append(_summarize(rec, contest, mode, penalty_seconds))
     rows.sort(key=lambda r: _sort_key(r, mode))
     for i, r in enumerate(rows):
         r["rank"] = i + 1
@@ -147,13 +208,16 @@ def is_frozen(contest, ts=None):
 def record_submission(contest, user, problem_id, result):
     """在评测完成后增量更新该用户的成绩分片与聚合榜单。
 
-    result 由评测引擎给出，包含 status / score / time_ms / memory_kb 等。
+    result 由评测引擎给出，包含 status / score / full_score / time_ms / memory_kb 等。
+    其中 score 是评测原始得分（题目自身分值体系），full_score 是题目原始满分。
+    IOI 模式下榜单总分再按该题在竞赛中的分值折算汇总（见 _weighted_score）。
     该函数在评测线程中调用，通过 storage 的文件级锁保证并发安全。
     """
     mode = contest.get("mode", "acm")
     penalty_seconds = int(config.DEFAULT_SETTINGS["ranking"]["penalty_seconds"])
     contest_id = contest["id"]
     user_id = user["id"]
+    problem_points = contest_problem_points(contest)
 
     def _update(rec):
         if rec is None:
@@ -163,11 +227,15 @@ def record_submission(contest, user, problem_id, result):
         probs = rec.setdefault("problems", {})
         p = probs.setdefault(problem_id, {
             "solved": False, "attempts": 0, "first_solve_time": None,
-            "score": 0, "time_ms": 0, "memory_kb": 0, "penalty": 0,
+            "score": 0, "raw_score": 0, "full_score": 100,
+            "time_ms": 0, "memory_kb": 0, "penalty": 0,
         })
         p["attempts"] += 1
         p["time_ms"] = max(p["time_ms"], result.get("time_ms", 0))
         p["memory_kb"] = max(p["memory_kb"], result.get("memory_kb", 0))
+        # 记录题目原始满分（用于分值折算；历史数据缺失时按 100 兜底）
+        full = result.get("full_score") or 100
+        p["full_score"] = full
 
         accepted = result.get("status") == "AC"
         if accepted:
@@ -179,7 +247,13 @@ def record_submission(contest, user, problem_id, result):
                     wrong_before = p["attempts"] - 1
                     p["penalty"] = elapsed + wrong_before * penalty_seconds
         if mode == "ioi":
-            p["score"] = max(p["score"], result.get("score", 0))
+            # 分片里只保留题目原始最高分，折算在汇总榜单时做，
+            # 这样管理员调整竞赛分值后直接重算即可，无需重判。
+            raw = result.get("score", 0)
+            p["raw_score"] = max(p.get("raw_score", 0), raw)
+            p["score"] = _weighted_score(
+                p["raw_score"], full, problem_points.get(problem_id, 100)
+            )
         elif mode == "acm":
             p["score"] = 1 if p["solved"] else 0
         return rec
@@ -189,9 +263,23 @@ def record_submission(contest, user, problem_id, result):
 
     # 增量更新聚合榜单：重新扫描并排序（分数变化才触发）
     _maybe_freeze_snapshot(contest)
-    ranking = _rebuild_ranking(contest_id, mode, penalty_seconds)
+    ranking = _rebuild_ranking(contest)
     locked_update(_ranking_path(contest_id), lambda _d: ranking, default=ranking)
     return record
+
+
+def refresh_ranking(contest):
+    """按竞赛当前配置（模式、每题分值）重算聚合榜单。
+
+    管理员修改竞赛题目分值/模式后调用；只读取成绩分片中的原始分重新折算，
+    不需要重判提交。封榜期间公开快照不受影响，仅实时榜单更新。
+    """
+    _maybe_freeze_snapshot(contest)
+    ranking = _rebuild_ranking(contest)
+    locked_update(
+        _ranking_path(contest["id"]), lambda _d: ranking, default=ranking
+    )
+    return ranking
 
 
 def _maybe_freeze_snapshot(contest):

@@ -83,7 +83,12 @@
       OJ.el("lbHead").innerHTML = `<tr>
         <th>#</th><th>用户</th>
         ${isAcm ? "<th class='text-center'>解题数</th><th class='text-center'>罚时</th>" : "<th class='text-center'>总分</th><th class='text-center'>用时</th>"}
-        ${problems.map(p => `<th class="text-center" title="${OJ.esc(p.problem_id)}">${OJ.esc(p.problem_id)}</th>`).join("")}
+        ${problems.map(p => {
+          const tip = isAcm ? p.problem_id : `${p.problem_id}（${p.points != null ? p.points : 100} 分）`;
+          const head = isAcm ? OJ.esc(p.problem_id)
+            : `${OJ.esc(p.problem_id)}<div class="muted" style="font-size:11px;font-weight:400">${p.points != null ? p.points : 100}分</div>`;
+          return `<th class="text-center" title="${OJ.esc(tip)}">${head}</th>`;
+        }).join("")}
       </tr>`;
 
       const rows = d.rows || [];
@@ -102,11 +107,11 @@
               ? `<td class="text-center"><span class="badge AC">✓${pr.attempts > 1 ? ` (${pr.attempts})` : ""}</span></td>`
               : `<td class="text-center"><span class="badge WA">-${pr.attempts}</span></td>`;
           }
-          return `<td class="text-center mono">${pr.score}</td>`;
+          return `<td class="text-center mono">${fmtScore(pr.score)}</td>`;
         }).join("");
         const metric = isAcm
           ? `<td class="text-center solved-cell">${r.solved}</td><td class="text-center mono">${fmtPenalty(r.penalty)}</td>`
-          : `<td class="text-center solved-cell">${r.score}</td><td class="text-center mono">${OJ.fmtDuration(r.total_time_ms)}</td>`;
+          : `<td class="text-center solved-cell">${fmtScore(r.score)}</td><td class="text-center mono">${OJ.fmtDuration(r.total_time_ms)}</td>`;
         return `<tr class="${meCls}">
           <td class="${rankCls}" style="font-weight:700">${r.rank}</td>
           <td>${OJ.esc(r.nickname || r.username)}${r.user_id === d.me ? " <span class='role-tag'>我</span>" : ""}</td>
@@ -119,6 +124,12 @@
       if (!sec && sec !== 0) return "-";
       const m = Math.floor(sec / 60), s = sec % 60;
       return `${m}:${String(s).padStart(2, "0")}`;
+    }
+
+    function fmtScore(v) {
+      const n = Number(v);
+      if (!isFinite(n)) return "0";
+      return String(Math.round(n * 100) / 100);
     }
 
     loadContests();

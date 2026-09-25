@@ -261,6 +261,7 @@ class JudgeEngine:
                 ranking.record_submission(contest, user, prob_key(sub), {
                     "status": final_status,
                     "score": total_score,
+                    "full_score": full_points,
                     "time_ms": 0,
                     "memory_kb": max_mem,
                 })

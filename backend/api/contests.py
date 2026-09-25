@@ -7,9 +7,42 @@ from backend import config
 from backend.api import ok, err, require_auth, require_admin, get_current_user
 from backend.storage import read_json, atomic_write_json, list_files
 from backend.utils import now_iso, gen_id, frozen_now
-from backend.judge.ranking import contest_status, contest_elapsed, reset_contest_scores
+from backend.judge.ranking import (
+    contest_status, contest_elapsed, reset_contest_scores, refresh_ranking,
+)
 
 contests_bp = Blueprint("contests", __name__)
+
+
+def _normalize_problems(raw):
+    """规范化竞赛题目列表，并校验每道题的分值（非负整数，缺省 100）。
+
+    返回 (problems, error)；error 非空表示校验失败。
+    """
+    problems = []
+    seen = set()
+    for i, item in enumerate(raw or []):
+        if not isinstance(item, dict):
+            return None, "竞赛题目格式不正确"
+        pid = item.get("problem_id")
+        if not pid:
+            return None, "第 %d 道题缺少题目 ID" % (i + 1)
+        if pid in seen:
+            return None, "题目 %s 重复添加" % pid
+        seen.add(pid)
+        raw_points = item.get("points", 100)
+        try:
+            points = int(raw_points)
+        except (ValueError, TypeError):
+            return None, "题目 %s 的分值必须是整数" % pid
+        if points < 0 or points > 100000:
+            return None, "题目 %s 的分值需在 0~100000 之间" % pid
+        try:
+            order = int(item.get("order", i + 1))
+        except (ValueError, TypeError):
+            order = i + 1
+        problems.append({"problem_id": pid, "points": points, "order": order})
+    return problems, None
 
 
 def _load(contest_id):
@@ -65,6 +98,9 @@ def create_contest():
     if not title:
         return err("竞赛标题不能为空", 400)
     contest_id = data.get("id") or gen_id("c")
+    problems, perr = _normalize_problems(data.get("problems", []))
+    if perr:
+        return err(perr, 400)
     c = {
         "id": contest_id,
         "title": title,
@@ -74,7 +110,7 @@ def create_contest():
         "freeze_time": data.get("freeze_time"),
         "freeze_enabled": bool(data.get("freeze_enabled", False)),
         "mode": data.get("mode", "acm"),
-        "problems": data.get("problems", []),
+        "problems": problems,
         "visible": data.get("visible", True),
         "created_at": now_iso(),
     }
@@ -89,10 +125,21 @@ def update_contest(contest_id):
     if not c:
         return err("竞赛不存在", 404)
     data = request.get_json(silent=True) or {}
+    new_problems = None
+    if "problems" in data:
+        new_problems, perr = _normalize_problems(data["problems"])
+        if perr:
+            return err(perr, 400)
+    # 改动影响榜单折算的字段：模式、题目构成或每题分值
+    score_relevant = ("mode" in data and data["mode"] != c.get("mode", "acm"))
     for key in ("title", "description", "start_time", "end_time", "freeze_time",
-                "mode", "problems"):
+                "mode"):
         if key in data:
             c[key] = data[key]
+    if new_problems is not None:
+        if new_problems != c.get("problems"):
+            score_relevant = True
+        c["problems"] = new_problems
     if "freeze_enabled" in data:
         c["freeze_enabled"] = bool(data["freeze_enabled"])
     if "visible" in data:
@@ -100,6 +147,9 @@ def update_contest(contest_id):
     if "title" in data and not (data["title"] or "").strip():
         return err("竞赛标题不能为空", 400)
     atomic_write_json(os.path.join(config.CONTESTS_DIR, f"{contest_id}.json"), c)
+    # 题目分值/模式调整后，按现有成绩分片重算榜单总分
+    if score_relevant:
+        refresh_ranking(c)
     return ok(_decorate(c))
 
 
