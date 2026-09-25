@@ -83,7 +83,7 @@
       OJ.el("lbHead").innerHTML = `<tr>
         <th>#</th><th>用户</th>
         ${isAcm ? "<th class='text-center'>解题数</th><th class='text-center'>罚时</th>" : "<th class='text-center'>总分</th><th class='text-center'>用时</th>"}
-        ${problems.map(p => `<th class="text-center" title="${OJ.esc(p.problem_id)}">${OJ.esc(p.problem_id)}</th>`).join("")}
+        ${problems.map(p => `<th class="text-center" title="${OJ.esc(p.problem_id)}">${OJ.esc(p.problem_id)}${isAcm ? "" : `<div class="muted" style="font-size:11px;font-weight:400">${p.points ?? 100} 分</div>`}</th>`).join("")}
       </tr>`;
 
       const rows = d.rows || [];

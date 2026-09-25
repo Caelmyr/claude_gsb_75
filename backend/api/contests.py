@@ -7,9 +7,37 @@ from backend import config
 from backend.api import ok, err, require_auth, require_admin, get_current_user
 from backend.storage import read_json, atomic_write_json, list_files
 from backend.utils import now_iso, gen_id, frozen_now
-from backend.judge.ranking import contest_status, contest_elapsed, reset_contest_scores
+from backend.judge.ranking import contest_status, contest_elapsed, reset_contest_scores, \
+    rebuild_contest_ranking
 
 contests_bp = Blueprint("contests", __name__)
+
+
+def _normalize_problems(problems):
+    """规范化竞赛题目列表：每项含 problem_id / points / order。
+
+    points 为该题在竞赛内的分值（整数、不小于 0、缺省 100），
+    与题目自身的默认分值相互独立，互不影响。
+    """
+    normalized = []
+    for i, item in enumerate(problems or []):
+        if isinstance(item, str):
+            item = {"problem_id": item}
+        if not isinstance(item, dict):
+            continue
+        pid = item.get("problem_id")
+        if not pid:
+            continue
+        try:
+            points = int(item.get("points", 100))
+        except (TypeError, ValueError):
+            points = 100
+        normalized.append({
+            "problem_id": pid,
+            "points": max(0, points),
+            "order": item.get("order", i + 1),
+        })
+    return normalized
 
 
 def _load(contest_id):
@@ -74,7 +102,7 @@ def create_contest():
         "freeze_time": data.get("freeze_time"),
         "freeze_enabled": bool(data.get("freeze_enabled", False)),
         "mode": data.get("mode", "acm"),
-        "problems": data.get("problems", []),
+        "problems": _normalize_problems(data.get("problems", [])),
         "visible": data.get("visible", True),
         "created_at": now_iso(),
     }
@@ -90,9 +118,11 @@ def update_contest(contest_id):
         return err("竞赛不存在", 404)
     data = request.get_json(silent=True) or {}
     for key in ("title", "description", "start_time", "end_time", "freeze_time",
-                "mode", "problems"):
+                "mode"):
         if key in data:
             c[key] = data[key]
+    if "problems" in data:
+        c["problems"] = _normalize_problems(data["problems"])
     if "freeze_enabled" in data:
         c["freeze_enabled"] = bool(data["freeze_enabled"])
     if "visible" in data:
@@ -100,6 +130,8 @@ def update_contest(contest_id):
     if "title" in data and not (data["title"] or "").strip():
         return err("竞赛标题不能为空", 400)
     atomic_write_json(os.path.join(config.CONTESTS_DIR, f"{contest_id}.json"), c)
+    # 分值/模式变更后按新配置重算榜单总分（已有成绩分片不变）
+    rebuild_contest_ranking(c)
     return ok(_decorate(c))
 
 

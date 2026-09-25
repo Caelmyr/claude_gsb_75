@@ -83,9 +83,15 @@
       await loadProblems();
       let c = null;
       if (id) c = await OJ.api("/contests/" + id);
-      const pids = new Set((c && c.problems || []).map(p => p.problem_id));
-      const problemChecks = problemsCache.map(p =>
-        `<label style="font-weight:400"><input type="checkbox" value="${OJ.esc(p.id)}" ${pids.has(p.id) ? "checked" : ""}> ${OJ.esc(p.id)} · ${OJ.esc(p.title)}</label>`
+      const curPoints = {};
+      (c && c.problems || []).forEach(p => { curPoints[p.problem_id] = p.points; });
+      const problemChecks = problemsCache.map(p => `
+        <div class="flex gap-8" style="align-items:center;padding:2px 0">
+          <label style="font-weight:400;flex:1"><input type="checkbox" value="${OJ.esc(p.id)}" ${curPoints[p.id] !== undefined ? "checked" : ""}> ${OJ.esc(p.id)} · ${OJ.esc(p.title)}</label>
+          <span class="muted" style="font-size:12px">分值</span>
+          <input type="number" class="pts-input" data-pid="${OJ.esc(p.id)}" min="0" step="1"
+                 value="${curPoints[p.id] !== undefined ? curPoints[p.id] : 100}" title="该题在竞赛中的分值" style="width:80px">
+        </div>`
       ).join("");
       const body = `
         <div class="form-group"><label>竞赛标题</label><input id="f_title" value="${OJ.esc(c ? c.title : "")}"></div>
@@ -103,7 +109,7 @@
             <label style="font-weight:400"><input type="checkbox" id="f_freeze_en" ${c && c.freeze_enabled ? "checked" : ""}> 启用封榜</label>
             <label style="font-weight:400;margin-left:12px"><input type="checkbox" id="f_visible" ${!c || c.visible ? "checked" : ""}> 公开可见</label></div>
         </div>
-        <div class="form-group"><label>竞赛题目</label>
+        <div class="form-group"><label>竞赛题目（可单独设置每题分值，IOI 模式按分值折算总分）</label>
           <div class="card" style="max-height:200px;overflow:auto;background:var(--surface-2)">${problemChecks || '<span class="muted">暂无题目</span>'}</div>
         </div>`;
       const mask = OJ.openModal(id ? "编辑竞赛" : "新建竞赛", body);
@@ -120,7 +126,12 @@
     async function save(id) {
       const problems = [...document.querySelectorAll('.modal input[type="checkbox"][value]')]
         .filter(x => x.value && !["f_freeze_en","f_visible"].includes(x.id) && x.checked)
-        .map((x, i) => ({ problem_id: x.value, points: 100, order: i + 1 }));
+        .map((x, i) => {
+          const inp = document.querySelector(`.modal .pts-input[data-pid="${x.value}"]`);
+          let points = parseInt(inp && inp.value, 10);
+          if (isNaN(points) || points < 0) points = 100;
+          return { problem_id: x.value, points, order: i + 1 };
+        });
       const body = {
         title: document.getElementById("f_title").value.trim(),
         description: document.getElementById("f_desc").value.trim(),
